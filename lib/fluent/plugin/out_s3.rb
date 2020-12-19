@@ -252,6 +252,13 @@ module Fluent::Plugin
       s3_client = Aws::S3::Client.new(options)
       @s3 = Aws::S3::Resource.new(client: s3_client)
 
+      if not @s3_bucket =~ /\$\{.*\}/
+        @bucket = @s3.bucket(@s3_bucket)
+        check_apikeys(@bucket) if @check_apikey_on_start
+        ensure_bucket(@bucket) if @check_bucket
+        ensure_bucket_lifecycle(@bucket)
+      end
+
       super
     end
 
@@ -270,40 +277,35 @@ module Fluent::Plugin
                    else
                      @time_slice_with_tz.call(metadata.timekey)
                    end
-
+      
       bucket_name = nil
 
-      if @s3_bucket.match(/\$\{.*\}/)
-
-        bucket_name = extract_placeholders(@s3_bucket, chunk)
-
-        if bucket_name.match(/\$\{.*\}/)
-
-            log.warn "Trying to use @s3_bucket_fallback as a fallback bucket name"
-            
+      if @s3_bucket =~ /\$\{.*\}/
+        @s3_bucket.scan(/\$\{([^\$\{\}]+)\}/) do |placeholder|
+          placeholder = placeholder.join
+          if (not chunk.metadata.variables) or (not chunk.metadata.variables.keys.include?(placeholder.to_sym))
+            log.warn "There is no placeholder '#{placeholder}'" 
             if @s3_bucket_fallback
-              
               bucket_name = @s3_bucket_fallback
-            
+              log.warn "Using @s3_bucket_fallback ('#{@s3_bucket_fallback}') as a fallback bucket name."
+              break
             else
-
-              raise "It was possible to extract_placeholder from @s3_bucket and there is no @s3_bucket_fallback set"
-
+              raise "It was possible to extract placeholder '#{placeholder}' from chunk and @s3_bucket_fallback is not set."
             end
-
+          end
         end
-         
+
+        if not bucket_name
+          bucket_name = extract_placeholders(@s3_bucket, chunk)
+        end
+
+        bucket = @s3.bucket(bucket_name)
+        check_apikeys(bucket) if @check_apikey_on_start
+        ensure_bucket(bucket) if @check_bucket
+        ensure_bucket_lifecycle(bucket)
       else
-
-        bucket_name = @s3_bucket
-
+        bucket = @bucket
       end
-
-      bucket = @s3.bucket(bucket_name)
-
-      check_apikeys(bucket) if @check_apikey_on_start
-      ensure_bucket(bucket) if @check_bucket
-      ensure_bucket_lifecycle(bucket)
 
       if @check_object
         begin
@@ -465,7 +467,7 @@ module Fluent::Plugin
       rescue Aws::S3::Errors::NoSuchLifecycleConfiguration
         []
       end
-     end
+    end
 
     def process_s3_object_key_format
       %W(%{uuid} %{uuid:random} %{uuid:hostname} %{uuid:timestamp}).each { |ph|
